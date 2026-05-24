@@ -14,13 +14,18 @@ const G = {
 };
 
 /* ── CANDIDATS (source de vérité) ── */
+// Converts a Drive file ID to a direct thumbnail URL (no CORS issues)
+function driveImg(id) {
+  return `https://lh3.googleusercontent.com/d/${id}`;
+}
+
 const ROIS = [
-  { id: "r1", nom: "Kouame Junior",  niveau: "Master 2",  dept: "O.S", ini: "KJ", photo: "https://drive.google.com/uc?export=view&id=1fyD7-6cG4eRQi94fGGKgiERL8kuKNcB4" },
-  { id: "r2", nom: "Kobenan Charly", niveau: "Licence 3", dept: "O.S", ini: "KC", photo: "https://drive.google.com/uc?export=view&id=1TvgthkRY1wt9bJpRPu_NGfpIVa-s7pa9" },
+  { id: "r1", nom: "Kouame Junior",  niveau: "Master 2",  dept: "O.S", ini: "KJ", photo: driveImg("1fyD7-6cG4eRQi94fGGKgiERL8kuKNcB4") },
+  { id: "r2", nom: "Kobenan Charly", niveau: "Licence 3", dept: "O.S", ini: "KC", photo: driveImg("1TvgthkRY1wt9bJpRPu_NGfpIVa-s7pa9") },
 ];
 const REINES = [
-  { id: "q1", nom: "Brizi Hadassa",    niveau: "Licence 3", dept: "O.S", ini: "BH", photo: "https://drive.google.com/uc?export=view&id=15PwtfLdq2SNQdFudc1e5wz5HZNbYsYuP" },
-  { id: "q2", nom: "Gbalenon Yasmine", niveau: "Licence 2", dept: "O.S", ini: "GY", photo: "https://drive.google.com/uc?export=view&id=1qjBwrLvzLZxKBwe4wftiUyCLwMCGhKnT" },
+  { id: "q1", nom: "Brizi Hadassa",    niveau: "Licence 3", dept: "O.S", ini: "BH", photo: driveImg("15PwtfLdq2SNQdFudc1e5wz5HZNbYsYuP") },
+  { id: "q2", nom: "Gbalenon Yasmine", niveau: "Licence 2", dept: "O.S", ini: "GY", photo: driveImg("1qjBwrLvzLZxKBwe4wftiUyCLwMCGhKnT") },
 ];
 const NIVEAUX = ["L1","L2","L3","M1","M2","D1","D2","D3","D4","D5","Docteur"];
 const MEDALS = ["🥇","🥈","🥉"];
