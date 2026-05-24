@@ -20,14 +20,15 @@ function driveImg(id) {
 }
 
 const ROIS = [
-  { id: "r1", nom: "Kouame Junior",  niveau: "Master 2",  dept: "O.S", ini: "KJ", photo: driveImg("1fyD7-6cG4eRQi94fGGKgiERL8kuKNcB4") },
-  { id: "r2", nom: "Kobenan Charly", niveau: "Licence 3", dept: "O.S", ini: "KC", photo: driveImg("1TvgthkRY1wt9bJpRPu_NGfpIVa-s7pa9") },
+  { id: "r1", nom: "Kouame Junior",    niveau: "Master 2",  dept: "Odonto-Stomatologie", ini: "KJ", photo: driveImg("1fyD7-6cG4eRQi94fGGKgiERL8kuKNcB4") },
+  { id: "r2", nom: "Kobenan Charly",   niveau: "Licence 3", dept: "Odonto-Stomatologie", ini: "KC", photo: driveImg("1TvgthkRY1wt9bJpRPu_NGfpIVa-s7pa9") },
+  { id: "r3", nom: "Tah K. Pascal",    niveau: "Master 2",  dept: "Odonto-Stomatologie", ini: "TP", photo: driveImg("1INdu2mUciegPxZlXKvmljFAc6Ny_-1qt") },
 ];
 const REINES = [
-  { id: "q1", nom: "Brizi Hadassa",    niveau: "Licence 3", dept: "O.S", ini: "BH", photo: driveImg("15PwtfLdq2SNQdFudc1e5wz5HZNbYsYuP") },
-  { id: "q2", nom: "Gbalenon Yasmine", niveau: "Licence 2", dept: "O.S", ini: "GY", photo: driveImg("1qjBwrLvzLZxKBwe4wftiUyCLwMCGhKnT") },
+  { id: "q1", nom: "Brizi Hadassa",    niveau: "Licence 3", dept: "Odonto-Stomatologie", ini: "BH", photo: driveImg("15PwtfLdq2SNQdFudc1e5wz5HZNbYsYuP") },
+  { id: "q2", nom: "Gbalenon Yasmine", niveau: "Licence 2", dept: "Odonto-Stomatologie", ini: "GY", photo: driveImg("1qjBwrLvzLZxKBwe4wftiUyCLwMCGhKnT") },
 ];
-const NIVEAUX = ["L1","L2","L3","M1","M2","D1","D2","D3","D4","D5","Docteur"];
+const NIVEAUX = ["L1","L2","L3","M1","M2","Doctorat","Docteur"];
 const MEDALS = ["🥇","🥈","🥉"];
 
 /* ════════════════════════════════
@@ -394,8 +395,13 @@ function Modal({ selRoi, selReine, onClose, onSuccess, uid }) {
 
         <div style={{ marginBottom: 8 }}>
           <label style={{ display: "block", fontSize: 9, letterSpacing: ".18em", textTransform: "uppercase", color: G.tm, marginBottom: 5 }}>Votre département / UFR</label>
-          <input value={form.dept} onChange={e => inp("dept", e.target.value)} placeholder="ex : Odonto-Stomatologie"
-            style={{ ...S, borderColor: errs.dept ? "#c0392b" : G.br }} />
+          <select value={form.dept} onChange={e => inp("dept", e.target.value)}
+            style={{ ...S, borderColor: errs.dept ? "#c0392b" : G.br }}>
+            <option value="">— Choisir —</option>
+            <option>Odonto-Stomatologie</option>
+            <option>EFAD</option>
+            <option>Prothésiste</option>
+          </select>
         </div>
 
         {errMsg && (
@@ -491,13 +497,14 @@ export default function App() {
   useEffect(() => {
     const initAndListen = async (col, key) => {
       const ref = doc(db, "counts", col);
-      /* init doc if doesn't exist */
+      /* always sync keys — adds new candidates, never removes old */
       const snap = await getDoc(ref);
-      if (!snap.exists()) {
-        const init = {};
-        (key === "rois" ? ROIS : REINES).forEach(c => { init[c.id] = 0; });
-        await setDoc(ref, init);
-      }
+      const existing = snap.exists() ? snap.data() : {};
+      const init = {};
+      (key === "rois" ? ROIS : REINES).forEach(c => {
+        init[c.id] = existing[c.id] ?? 0;
+      });
+      await setDoc(ref, init, { merge: false });
       return onSnapshot(ref, snap => {
         setCounts(prev => ({ ...prev, [key]: snap.data() || {} }));
         setLoading(false);
