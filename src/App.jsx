@@ -15,12 +15,12 @@ const G = {
 
 /* ── CANDIDATS (source de vérité) ── */
 const ROIS = [
-  { id: "r1", nom: "Kouame Junior",   niveau: "Master 2",  dept: "O.S", ini: "KJ" },
-  { id: "r2", nom: "Kobenan Charly",  niveau: "Licence 3", dept: "O.S", ini: "KC" },
+  { id: "r1", nom: "Kouame Junior",  niveau: "Master 2",  dept: "O.S", ini: "KJ", photo: "https://drive.google.com/uc?export=view&id=1fyD7-6cG4eRQi94fGGKgiERL8kuKNcB4" },
+  { id: "r2", nom: "Kobenan Charly", niveau: "Licence 3", dept: "O.S", ini: "KC", photo: "https://drive.google.com/uc?export=view&id=1TvgthkRY1wt9bJpRPu_NGfpIVa-s7pa9" },
 ];
 const REINES = [
-  { id: "q1", nom: "Brizi Hadassa",     niveau: "Licence 3", dept: "O.S", ini: "BH" },
-  { id: "q2", nom: "Gbalenon Yasmine",  niveau: "Licence 2", dept: "O.S", ini: "GY" },
+  { id: "q1", nom: "Brizi Hadassa",    niveau: "Licence 3", dept: "O.S", ini: "BH", photo: "https://drive.google.com/uc?export=view&id=15PwtfLdq2SNQdFudc1e5wz5HZNbYsYuP" },
+  { id: "q2", nom: "Gbalenon Yasmine", niveau: "Licence 2", dept: "O.S", ini: "GY", photo: "https://drive.google.com/uc?export=view&id=1qjBwrLvzLZxKBwe4wftiUyCLwMCGhKnT" },
 ];
 const NIVEAUX = ["L1","L2","L3","M1","M2","D1","D2","D3","D4","D5","Docteur"];
 const MEDALS = ["🥇","🥈","🥉"];
@@ -192,16 +192,45 @@ function CCard({ c, cat, rank, cnt, total, maxCnt, selected, dimmed, voted, onPi
         display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10,
         position: "relative", overflow: "hidden"
       }}>
-        <div style={{ position: "absolute", inset: 0, background: "radial-gradient(ellipse at 50% 80%,rgba(201,168,76,.09) 0%,transparent 70%)" }} />
-        <div style={{
-          width: 78, height: 78, borderRadius: "50%",
-          background: `rgba(201,168,76,${isSel ? .22 : .1})`,
-          border: `1px solid rgba(201,168,76,${isSel ? .45 : .25})`,
-          display: "flex", alignItems: "center", justifyContent: "center",
-          fontFamily: "'Cormorant Garamond',serif", fontSize: 28, color: G.gold, fontStyle: "italic",
-          zIndex: 1, transition: "background .3s"
-        }}>{c.ini}</div>
-        <span style={{ fontSize: 9, letterSpacing: ".12em", textTransform: "uppercase", color: G.tm, zIndex: 1 }}>Photo à venir</span>
+        {c.photo ? (
+          <>
+            <img
+              src={c.photo}
+              alt={c.nom}
+              style={{
+                position: "absolute", inset: 0, width: "100%", height: "100%",
+                objectFit: "cover", objectPosition: "center top",
+                transition: "filter .4s ease",
+                filter: isSel ? "brightness(1.08)" : "brightness(0.85)",
+              }}
+              onError={e => { e.target.style.display = "none"; }}
+            />
+            <div style={{
+              position: "absolute", bottom: 0, left: 0, right: 0, height: "38%",
+              background: "linear-gradient(to top, rgba(7,6,10,.9) 0%, transparent 100%)",
+              zIndex: 1, pointerEvents: "none"
+            }} />
+            {isSel && (
+              <div style={{
+                position: "absolute", inset: 0, zIndex: 2, pointerEvents: "none",
+                boxShadow: `inset 0 0 0 2px #C9A84C`
+              }} />
+            )}
+          </>
+        ) : (
+          <>
+            <div style={{ position: "absolute", inset: 0, background: "radial-gradient(ellipse at 50% 80%,rgba(201,168,76,.09) 0%,transparent 70%)" }} />
+            <div style={{
+              width: 78, height: 78, borderRadius: "50%",
+              background: `rgba(201,168,76,${isSel ? .22 : .1})`,
+              border: `1px solid rgba(201,168,76,${isSel ? .45 : .25})`,
+              display: "flex", alignItems: "center", justifyContent: "center",
+              fontFamily: "'Cormorant Garamond',serif", fontSize: 28, color: G.gold, fontStyle: "italic",
+              zIndex: 1, transition: "background .3s"
+            }}>{c.ini}</div>
+            <span style={{ fontSize: 9, letterSpacing: ".12em", textTransform: "uppercase", color: G.tm, zIndex: 1 }}>Photo à venir</span>
+          </>
+        )}
       </div>
 
       <div style={{ padding: "15px 16px 18px" }}>
