@@ -25,8 +25,9 @@ const ROIS = [
   { id: "r3", nom: "Tah K. Pascal",    niveau: "Master 2",  dept: "Odonto-Stomatologie", ini: "TP", photo: driveImg("1INdu2mUciegPxZlXKvmljFAc6Ny_-1qt") },
 ];
 const REINES = [
-  { id: "q1", nom: "Brizi Hadassa",    niveau: "Licence 3", dept: "Odonto-Stomatologie", ini: "BH", photo: driveImg("15PwtfLdq2SNQdFudc1e5wz5HZNbYsYuP") },
-  { id: "q2", nom: "Gbalenon Yasmine", niveau: "Licence 2", dept: "Odonto-Stomatologie", ini: "GY", photo: driveImg("1qjBwrLvzLZxKBwe4wftiUyCLwMCGhKnT") },
+  { id: "q1", nom: "Brizi Hadassa",             niveau: "Licence 3", dept: "Odonto-Stomatologie", ini: "BH", photo: driveImg("15PwtfLdq2SNQdFudc1e5wz5HZNbYsYuP") },
+  { id: "q2", nom: "Gbalenon Yasmine",          niveau: "Licence 2", dept: "Odonto-Stomatologie", ini: "GY", photo: driveImg("1qjBwrLvzLZxKBwe4wftiUyCLwMCGhKnT") },
+  { id: "q3", nom: "Monet Adounin Grâce Flora", niveau: "Licence 3", dept: "Odonto-Stomatologie", ini: "MG", photo: "https://ibb.co/XxMFtg46"><img src="https://i.ibb.co/tpFYDthn/8943d6e9-a143-4e7d-b696-2972e9f37d80.jpg" },
 ];
 const NIVEAUX = ["L1","L2","L3","M1","M2","Doctorat","Docteur"];
 const MEDALS = ["🥇","🥈","🥉"];
