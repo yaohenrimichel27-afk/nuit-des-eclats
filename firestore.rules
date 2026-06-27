@@ -16,5 +16,14 @@ service cloud.firestore {
       allow read, delete, update: if true;
       allow create: if request.auth != null && request.auth.uid == uid;
     }
+
+    // Device fingerprint locks — empêche un même appareil de voter
+    // plusieurs fois, même en navigation privée (où uid change à chaque fois)
+    match /deviceVotes/{fingerprintId} {
+      allow read: if true;
+      allow create: if request.auth != null;
+      allow delete: if true; // admin peut débloquer un appareil si besoin
+      allow update: if false;
+    }
   }
 }
