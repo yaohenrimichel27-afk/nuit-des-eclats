@@ -507,7 +507,12 @@ export default function Admin() {
     if (score > 0) return "Risque faible";
     return "Aucun signal";
   }
-
+  function formatVoteTime(v) {
+    if (!v.ts?.seconds) return "heure inconnue";
+    return new Date(v.ts.seconds * 1000).toLocaleString("fr-FR", {
+      day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit"
+    });
+  }
 
 
   const inputStyle = {
@@ -767,29 +772,50 @@ export default function Admin() {
                           ))}
                         </div>
 
-                        {/* If this vote is part of a name-similarity pair, offer a direct
-                            "keep this one, the other is fraud" shortcut right here */}
+                        {/* If this vote is part of a name-similarity pair, show both
+                            timestamps and let the admin pick EITHER direction explicitly */}
                         {(() => {
                           const twinPair = nameSuspectGroups.find(p => p.a.id === v.id || p.b.id === v.id);
                           if (!twinPair) return null;
                           const twin = twinPair.a.id === v.id ? twinPair.b : twinPair.a;
                           return (
                             <div style={{
-                              background: "rgba(95,184,120,.06)", border: "1px solid rgba(95,184,120,.25)",
+                              background: "rgba(95,184,120,.05)", border: "1px solid rgba(95,184,120,.22)",
                               borderRadius: 10, padding: "10px 12px", marginBottom: 10
                             }}>
-                              <div style={{ fontSize: 11, color: G.tm, marginBottom: 7 }}>
-                                Identité jumelle détectée : <b style={{color:G.tx}}>{twin.prenom} {twin.nom}</b>
+                              <div style={{ fontSize: 11, color: G.tm, marginBottom: 9 }}>
+                                Identité jumelle détectée :
                               </div>
-                              <button
-                                onClick={() => keepOneMarkOtherFraud(v.id, twin.id, `${v.prenom} ${v.nom}`, `${twin.prenom} ${twin.nom}`)}
-                                disabled={busy}
-                                style={{
-                                  width: "100%", padding: "8px", background: "rgba(95,184,120,.12)",
-                                  border: "1px solid rgba(95,184,120,.45)", borderRadius: 8,
-                                  color: "#5fb878", fontSize: 11, fontWeight: 500, cursor: "pointer"
-                                }}
-                              >✓ Garder {v.prenom}, marquer {twin.prenom} comme fraude</button>
+                              <div style={{ display: "flex", flexDirection: "column", gap: 5, marginBottom: 10 }}>
+                                <div style={{ fontSize: 11.5, color: G.tx, background: G.s2, borderRadius: 7, padding: "6px 9px", display: "flex", justifyContent: "space-between" }}>
+                                  <span><b>{v.prenom} {v.nom}</b></span>
+                                  <span style={{ color: G.tm, fontSize: 10.5 }}>{formatVoteTime(v)}</span>
+                                </div>
+                                <div style={{ fontSize: 11.5, color: G.tx, background: G.s2, borderRadius: 7, padding: "6px 9px", display: "flex", justifyContent: "space-between" }}>
+                                  <span><b>{twin.prenom} {twin.nom}</b></span>
+                                  <span style={{ color: G.tm, fontSize: 10.5 }}>{formatVoteTime(twin)}</span>
+                                </div>
+                              </div>
+                              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                                <button
+                                  onClick={() => keepOneMarkOtherFraud(v.id, twin.id, `${v.prenom} ${v.nom}`, `${twin.prenom} ${twin.nom}`)}
+                                  disabled={busy}
+                                  style={{
+                                    width: "100%", padding: "8px", background: "rgba(95,184,120,.1)",
+                                    border: "1px solid rgba(95,184,120,.4)", borderRadius: 8,
+                                    color: "#5fb878", fontSize: 11, fontWeight: 500, cursor: "pointer"
+                                  }}
+                                >✓ Garder {v.prenom}, marquer {twin.prenom} fraude</button>
+                                <button
+                                  onClick={() => keepOneMarkOtherFraud(twin.id, v.id, `${twin.prenom} ${twin.nom}`, `${v.prenom} ${v.nom}`)}
+                                  disabled={busy}
+                                  style={{
+                                    width: "100%", padding: "8px", background: "rgba(231,76,60,.08)",
+                                    border: "1px solid rgba(231,76,60,.35)", borderRadius: 8,
+                                    color: "#e08070", fontSize: 11, fontWeight: 500, cursor: "pointer"
+                                  }}
+                                >✓ Garder {twin.prenom}, marquer {v.prenom} fraude</button>
+                              </div>
                             </div>
                           );
                         })()}
@@ -909,10 +935,13 @@ export default function Admin() {
                       <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 12 }}>
                         {[[pair.a, pair.b], [pair.b, pair.a]].map(([v, other]) => (
                           <div key={v.id} style={{ background: G.s2, borderRadius: 10, padding: "10px 12px" }}>
-                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
                               <span style={{ fontSize: 12.5, color: G.tx }}>
                                 <b>{v.prenom} {v.nom}</b> <span style={{color:G.tm}}>· {v.niveau || "—"} · {v.dept || "—"}</span>
                               </span>
+                            </div>
+                            <div style={{ fontSize: 10.5, color: G.tm, marginBottom: 6 }}>
+                              🕐 voté le {formatVoteTime(v)}
                             </div>
                             <div style={{ fontSize: 10.5, color: G.gold, marginBottom: 8 }}>
                               ♚ {nameOf(v.roi)} · ♛ {nameOf(v.reine)}
