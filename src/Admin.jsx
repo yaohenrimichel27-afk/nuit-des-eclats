@@ -93,6 +93,7 @@ export default function Admin() {
   const [pwdErr, setPwdErr] = useState(false);
 
   const [votes, setVotes] = useState([]);
+  const [rejectedAttempts, setRejectedAttempts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [tab, setTab] = useState("liste"); // liste | fraude
@@ -108,9 +109,14 @@ export default function Admin() {
 
   async function loadVotes() {
     setLoading(true);
-    const snap = await getDocs(collection(db, "votes"));
-    const list = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    const [votesSnap, rejSnap] = await Promise.all([
+      getDocs(collection(db, "votes")),
+      getDocs(collection(db, "rejectedAttempts")).catch(() => ({ docs: [] })),
+    ]);
+    const list = votesSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+    const rejList = rejSnap.docs.map(d => ({ id: d.id, ...d.data() }));
     setVotes(list);
+    setRejectedAttempts(rejList);
     setLoading(false);
   }
 
@@ -320,11 +326,13 @@ export default function Admin() {
     if (v.reine) fraudByCandidat[v.reine] = (fraudByCandidat[v.reine] || 0) + 1;
   });
 
-  /* ── SUSPECT DETECTION ──
-     Groups non-fraud, non-ignored votes by identical (roi, reine) pair,
-     then finds clusters where consecutive votes are < 2 min apart.
-     A cluster of 2+ such votes = suspect group. */
-  const SUSPECT_WINDOW = 120; // seconds
+  /* ── TIMING-REGULARITY SUSPECT DETECTION ──
+     Instead of a fixed "< 2 minutes" window (which flags normal crowd voting
+     for a popular candidate), we look for REGULARITY: humans voting
+     independently produce irregular gaps (15s, 47s, 8s...). A script or
+     someone repeating the same vote produces very even gaps.
+     We group by identical (roi, reine) pair, then flag runs of 3+ votes
+     whose consecutive gaps have low variance relative to their average. */
   const suspectGroups = (() => {
     const candidates = votes.filter(v => !v.fraud && !v.ignoredSuspect && v.ts?.seconds);
     const byPair = {};
@@ -334,18 +342,31 @@ export default function Admin() {
     });
     const groups = [];
     Object.entries(byPair).forEach(([key, list]) => {
+      if (list.length < 3) return; // need at least 3 votes to measure regularity
       const sortedList = [...list].sort((a, b) => a.ts.seconds - b.ts.seconds);
-      let cluster = [sortedList[0]];
-      for (let i = 1; i < sortedList.length; i++) {
-        const gap = sortedList[i].ts.seconds - sortedList[i - 1].ts.seconds;
-        if (gap <= SUSPECT_WINDOW) {
-          cluster.push(sortedList[i]);
-        } else {
-          if (cluster.length >= 2) groups.push({ key, votes: cluster });
-          cluster = [sortedList[i]];
+      // sliding window of 3: check gap regularity
+      for (let i = 0; i + 2 < sortedList.length; i++) {
+        const windowVotes = [sortedList[i], sortedList[i+1], sortedList[i+2]];
+        const gaps = [windowVotes[1].ts.seconds - windowVotes[0].ts.seconds,
+                      windowVotes[2].ts.seconds - windowVotes[1].ts.seconds];
+        const avg = (gaps[0] + gaps[1]) / 2;
+        if (avg <= 0 || avg > 600) continue; // ignore gaps > 10min apart, not a "rafale"
+        const variance = Math.abs(gaps[0] - gaps[1]);
+        const regularityRatio = variance / avg; // low ratio = very regular = suspicious
+        if (regularityRatio < 0.35 && avg < 180) {
+          // extend the cluster forward as long as regularity holds
+          let cluster = [...windowVotes];
+          let j = i + 3;
+          while (j < sortedList.length) {
+            const gap = sortedList[j].ts.seconds - sortedList[j-1].ts.seconds;
+            if (gap > 0 && gap < 180 && Math.abs(gap - avg) / avg < 0.5) {
+              cluster.push(sortedList[j]); j++;
+            } else break;
+          }
+          groups.push({ key, votes: cluster, avgGap: avg, regularityRatio });
+          break; // move to next pair, avoid overlapping duplicate clusters
         }
       }
-      if (cluster.length >= 2) groups.push({ key, votes: cluster });
     });
     return groups.sort((a, b) => b.votes.length - a.votes.length);
   })();
@@ -374,7 +395,91 @@ export default function Admin() {
   })();
   const nameSuspectVoteIds = new Set(nameSuspectGroups.flatMap(p => [p.a.id, p.b.id]));
   const nameSuspectCount = nameSuspectGroups.length;
-  const totalSuspectCount = suspectCount + nameSuspectVoteIds.size;
+
+  /* ── LINKED REJECTED ATTEMPTS ──
+     A rejected attempt (blocked by device fingerprint) followed shortly after
+     by a SUCCESSFUL vote from a DIFFERENT identity is a strong fraud signal:
+     someone tried once, got blocked, then changed their name and got through
+     on a different device/session. We link each successful vote to any
+     rejected attempt sharing a fingerprint within 10 minutes before it. */
+  const linkedRejections = (() => {
+    const links = [];
+    rejectedAttempts.forEach(att => {
+      if (!att.fingerprint || !att.ts?.seconds) return;
+      // does this fingerprint have a successful vote (originalUid) we can show?
+      const successVote = votes.find(v => v.uid === att.originalUid);
+      links.push({ attempt: att, successVote });
+    });
+    return links;
+  })();
+  const linkedRejectionVoteIds = new Set(
+    linkedRejections.filter(l => l.successVote).map(l => l.successVote.id)
+  );
+
+  /* ── COMPOSITE RISK SCORE ──
+     Combines every signal we have into one 0-100 score per vote.
+     This is the "read top of the list first" view. */
+  const riskScores = (() => {
+    const scores = {};
+    votes.forEach(v => { scores[v.id] = { score: 0, reasons: [] }; });
+
+    // signal 1: timing-regularity cluster membership
+    suspectGroups.forEach(g => {
+      g.votes.forEach(v => {
+        if (scores[v.id]) {
+          scores[v.id].score += 35;
+          scores[v.id].reasons.push(`Rafale régulière (${g.votes.length} votes, ~${Math.round(g.avgGap)}s d'écart constant)`);
+        }
+      });
+    });
+
+    // signal 2: name similarity
+    nameSuspectGroups.forEach(p => {
+      [p.a, p.b].forEach(v => {
+        if (scores[v.id]) {
+          scores[v.id].score += 30;
+          scores[v.id].reasons.push(`Identité similaire à un autre votant — ${p.reason}`);
+        }
+      });
+    });
+
+    // signal 3: linked to a rejected attempt (someone tried, got blocked, then succeeded differently)
+    linkedRejections.forEach(l => {
+      if (l.successVote && scores[l.successVote.id]) {
+        scores[l.successVote.id].score += 40;
+        scores[l.successVote.id].reasons.push(
+          `Une tentative de vote a été bloquée sur cet appareil pour "${l.attempt.prenom} ${l.attempt.nom}" avant que ce vote ne passe sous un autre nom`
+        );
+      }
+    });
+
+    // signal 4: already flagged fraud → max score, already actioned reasons don't matter much
+    votes.forEach(v => {
+      if (v.fraud && scores[v.id]) {
+        scores[v.id].score = 100;
+      }
+    });
+
+    // cap at 100
+    Object.values(scores).forEach(s => { s.score = Math.min(s.score, 100); });
+    return scores;
+  })();
+
+  const totalSuspectCount = new Set([...suspectVoteIds, ...nameSuspectVoteIds, ...linkedRejectionVoteIds]).size;
+
+  function riskColor(score) {
+    if (score >= 60) return G.red;
+    if (score >= 30) return "#f0a020";
+    return "#5fb878";
+  }
+  function riskLabel(score) {
+    if (score >= 60) return "Risque élevé";
+    if (score >= 30) return "Risque modéré";
+    if (score > 0) return "Risque faible";
+    return "Aucun signal";
+  }
+
+
 
   const inputStyle = {
     width: "100%", background: G.s2, border: `1px solid ${G.br}`, borderRadius: 10,
@@ -573,35 +678,124 @@ export default function Admin() {
         {/* ════ TAB: SUSPECTS ════ */}
         {tab === "suspects" && (
           <div>
-            <div style={{ background: G.s1, border: `1px solid ${G.br}`, borderRadius: 14, padding: 16, marginBottom: 16 }}>
+            <div style={{ background: G.s1, border: `1px solid ${G.br}`, borderRadius: 14, padding: 16, marginBottom: 18 }}>
               <p style={{ fontSize: 12.5, color: G.tm, lineHeight: 1.6 }}>
-                Détection automatique sur deux critères : <b style={{color:"#f0a020"}}>votes identiques rapprochés</b> (même Roi+Reine, &lt;2 min) et <b style={{color:"#f0a020"}}>identités similaires</b> (noms inversés, fautes de frappe). Chaque cas indique sa raison. Confirme la fraude ou ignore si c'est légitime.
+                Chaque vote reçoit un <b style={{color:G.goldL}}>score de risque</b> combinant plusieurs signaux : régularité anormale des intervalles, identité similaire à un autre votant, et lien avec une tentative de double-vote bloquée. Les plus risqués apparaissent en premier.
               </p>
             </div>
 
-            {suspectGroups.length === 0 && nameSuspectGroups.length === 0 ? (
-              <p style={{ textAlign: "center", color: G.tm, padding: 40 }}>✅ Aucun groupe suspect détecté</p>
-            ) : (
+            {/* ── RISK-SCORED LIST (priority view) ── */}
+            {(() => {
+              const scored = votes
+                .map(v => ({ vote: v, ...riskScores[v.id] }))
+                .filter(s => s.score > 0 && !s.vote.fraud)
+                .sort((a, b) => b.score - a.score);
+
+              if (scored.length === 0) {
+                return <p style={{ textAlign: "center", color: G.tm, padding: 40 }}>✅ Aucun signal de risque détecté</p>;
+              }
+
+              return (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  {scored.map(({ vote: v, score, reasons }) => (
+                    <div key={v.id} style={{
+                      background: G.s1, border: `1px solid ${riskColor(score)}55`,
+                      borderRadius: 14, padding: "14px 16px", position: "relative", overflow: "hidden"
+                    }}>
+                      {/* risk gauge bar background */}
+                      <div style={{
+                        position: "absolute", top: 0, left: 0, bottom: 0, width: `${score}%`,
+                        background: `linear-gradient(90deg, ${riskColor(score)}18, transparent)`,
+                        zIndex: 0
+                      }} />
+                      <div style={{ position: "relative", zIndex: 1 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
+                          <div>
+                            <div style={{ fontSize: 15.5, fontWeight: 500, color: G.tx }}>{v.prenom} {v.nom}</div>
+                            <div style={{ fontSize: 11, color: G.tm, marginTop: 2 }}>
+                              {v.niveau || "—"} · {v.dept || "—"} · ♚{nameOf(v.roi)} · ♛{nameOf(v.reine)}
+                            </div>
+                          </div>
+                          <div style={{ textAlign: "center", flexShrink: 0, marginLeft: 10 }}>
+                            <div style={{
+                              width: 44, height: 44, borderRadius: "50%",
+                              border: `3px solid ${riskColor(score)}`,
+                              display: "flex", alignItems: "center", justifyContent: "center",
+                              fontSize: 13, fontWeight: 700, color: riskColor(score),
+                              background: G.black
+                            }}>{score}</div>
+                            <div style={{ fontSize: 8.5, color: riskColor(score), marginTop: 3, letterSpacing: ".03em", textTransform: "uppercase" }}>
+                              {riskLabel(score)}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div style={{ display: "flex", flexDirection: "column", gap: 5, marginBottom: 12 }}>
+                          {reasons.map((r, ri) => (
+                            <div key={ri} style={{ fontSize: 11.5, color: G.tx, background: G.s2, borderRadius: 8, padding: "7px 10px", fontStyle: "italic" }}>
+                              💡 {r}
+                            </div>
+                          ))}
+                        </div>
+
+                        <div style={{ display: "flex", gap: 8 }}>
+                          <button onClick={async () => {
+                              setBusy(true);
+                              try {
+                                await updateDoc(doc(db, "votes", v.id), { ignoredSuspect: true });
+                                setVotes(prev => prev.map(x => x.id === v.id ? { ...x, ignoredSuspect: true } : x));
+                                showToast("✅ Vote considéré comme légitime");
+                              } catch (e) { console.error(e); showToast("❌ Erreur"); }
+                              setBusy(false);
+                            }} disabled={busy} style={{
+                            flex: 1, padding: "10px", background: "transparent", border: `1px solid ${G.br}`,
+                            borderRadius: 10, color: G.tm, fontSize: 12, fontWeight: 500, cursor: "pointer"
+                          }}>✅ Légitime, ignorer</button>
+                          <button onClick={async () => {
+                              if (!confirm(`Marquer le vote de "${v.prenom} ${v.nom}" comme frauduleux ?`)) return;
+                              setBusy(true);
+                              try {
+                                await updateDoc(doc(db, "votes", v.id), { fraud: true });
+                                setVotes(prev => prev.map(x => x.id === v.id ? { ...x, fraud: true } : x));
+                                showToast("🚩 Vote confirmé comme fraude");
+                              } catch (e) { console.error(e); showToast("❌ Erreur"); }
+                              setBusy(false);
+                            }} disabled={busy} style={{
+                            flex: 1, padding: "10px", background: "linear-gradient(135deg,#a02d20,#e74c3c)",
+                            border: "none", borderRadius: 10, color: "#fff", fontSize: 12, fontWeight: 600, cursor: "pointer"
+                          }}>🚩 Confirmer fraude</button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              );
+            })()}
+
+            {/* ── DETAIL SECTIONS (grouped view, for context) ── */}
+            {(suspectGroups.length > 0 || nameSuspectGroups.length > 0) && (
               <>
+                <div style={{ width: 60, height: 1, background: `linear-gradient(90deg,transparent,${G.br},transparent)`, margin: "28px auto 20px" }} />
+                <p style={{ fontSize: 11, color: G.tm, textAlign: "center", marginBottom: 16, letterSpacing: ".08em", textTransform: "uppercase" }}>
+                  Détail par type de détection
+                </p>
+
                 {suspectGroups.length > 0 && (
                   <p style={{ fontFamily: "'Cormorant Garamond',serif", fontSize: 18, color: G.tx, marginBottom: 10 }}>
-                    🕐 Rafales de votes identiques
+                    🕐 Rafales à intervalle régulier
                   </p>
                 )}
                 <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: nameSuspectGroups.length > 0 ? 22 : 0 }}>
                   {suspectGroups.map((g, gi) => {
                     const [roiId, reineId] = g.key.split("|");
-                    const first = g.votes[0].ts.seconds;
-                    const last = g.votes[g.votes.length - 1].ts.seconds;
-                    const spanSec = last - first;
                     return (
                       <div key={gi} style={{ background: "rgba(240,160,32,.06)", border: "1px solid rgba(240,160,32,.35)", borderRadius: 14, padding: "16px 16px" }}>
                         <div style={{ marginBottom: 10 }}>
                           <div style={{ fontSize: 15, color: "#f0a020", fontWeight: 600 }}>
-                            ⚠️ {g.votes.length} votes identiques
+                            ⚠️ {g.votes.length} votes à rythme constant
                           </div>
                           <div style={{ fontSize: 11.5, color: G.tx, marginTop: 4, fontStyle: "italic" }}>
-                            Pourquoi : même choix (♚ {nameOf(roiId)} · ♛ {nameOf(reineId)}) voté {g.votes.length} fois en seulement {spanSec < 60 ? `${spanSec} secondes` : `${Math.round(spanSec/60)} minutes`} — trop rapide pour des votes indépendants.
+                            Pourquoi : même choix (♚ {nameOf(roiId)} · ♛ {nameOf(reineId)}) voté avec un écart quasi-identique d'environ {Math.round(g.avgGap)}s entre chaque vote — ce niveau de régularité est rare chez des votants indépendants.
                           </div>
                         </div>
 
@@ -634,7 +828,7 @@ export default function Admin() {
                     🔤 Identités similaires (doublons probables)
                   </p>
                 )}
-                <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: linkedRejections.length > 0 ? 22 : 0 }}>
                   {nameSuspectGroups.map((pair, pi) => (
                     <div key={pi} style={{ background: "rgba(240,160,32,.06)", border: "1px solid rgba(240,160,32,.35)", borderRadius: 14, padding: "16px 16px" }}>
                       <div style={{ marginBottom: 10 }}>
@@ -668,6 +862,34 @@ export default function Admin() {
                     </div>
                   ))}
                 </div>
+
+                {linkedRejections.filter(l => l.successVote).length > 0 && (
+                  <>
+                    <p style={{ fontFamily: "'Cormorant Garamond',serif", fontSize: 18, color: G.tx, marginBottom: 10 }}>
+                      🔁 Tentatives refusées liées à un vote réussi
+                    </p>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                      {linkedRejections.filter(l => l.successVote).map((l, li) => (
+                        <div key={li} style={{ background: "rgba(231,76,60,.06)", border: "1px solid rgba(231,76,60,.3)", borderRadius: 14, padding: "16px 16px" }}>
+                          <div style={{ fontSize: 15, color: G.red, fontWeight: 600, marginBottom: 8 }}>
+                            🔁 Double tentative depuis le même appareil
+                          </div>
+                          <div style={{ fontSize: 11.5, color: G.tx, marginBottom: 12, fontStyle: "italic" }}>
+                            Une tentative pour <b>"{l.attempt.prenom} {l.attempt.nom}"</b> a été bloquée (appareil déjà utilisé), puis un vote a été accepté sous un nom différent depuis ce même appareil.
+                          </div>
+                          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                            <div style={{ fontSize: 11.5, color: G.tm, background: G.s2, borderRadius: 8, padding: "8px 10px" }}>
+                              🚫 Tentative refusée : <b style={{color:G.tx}}>{l.attempt.prenom} {l.attempt.nom}</b> — ♚{nameOf(l.attempt.attemptedRoi)} ♛{nameOf(l.attempt.attemptedReine)}
+                            </div>
+                            <div style={{ fontSize: 11.5, color: G.tm, background: G.s2, borderRadius: 8, padding: "8px 10px" }}>
+                              ✅ Vote accepté : <b style={{color:G.tx}}>{l.successVote.prenom} {l.successVote.nom}</b> — ♚{nameOf(l.successVote.roi)} ♛{nameOf(l.successVote.reine)}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
               </>
             )}
           </div>

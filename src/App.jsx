@@ -331,6 +331,19 @@ function Modal({ selRoi, selReine, onClose, onSuccess, uid }) {
         const fpRef = doc(db, "deviceVotes", fingerprint);
         const fpSnap = await getDoc(fpRef);
         if (fpSnap.exists()) {
+          /* Log this rejected attempt — reveals if someone tries to
+             re-vote from the same device under a different identity */
+          try {
+            await setDoc(doc(collection(db, "rejectedAttempts")), {
+              fingerprint,
+              attemptedRoi: selRoi, attemptedReine: selReine,
+              prenom: form.prenom.trim(), nom: form.nom.trim(),
+              niveau: form.niveau, dept: form.dept.trim(),
+              originalUid: fpSnap.data().uid,
+              ts: serverTimestamp()
+            });
+          } catch (logErr) { console.error("Log failed:", logErr); }
+
           setErrMsg("Un vote a déjà été enregistré depuis cet appareil.");
           setLoading(false);
           return;
