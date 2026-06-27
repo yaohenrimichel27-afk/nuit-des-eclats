@@ -26,6 +26,67 @@ const nameOf = id => ALL_CANDIDATS.find(c => c.id === id)?.nom || id;
 
 const ADMIN_PASSWORD = "NuitDesEclats2026";
 
+/* ── NAME SIMILARITY HELPERS ──
+   Detects: reversed first/last name, typos (Levenshtein distance), spacing differences */
+function normalizeName(s) {
+  return (s || "")
+    .toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // strip accents
+    .replace(/[^a-z\s]/g, "")
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
+function levenshtein(a, b) {
+  const m = a.length, n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      dp[i][j] = a[i-1] === b[j-1]
+        ? dp[i-1][j-1]
+        : 1 + Math.min(dp[i-1][j], dp[i][j-1], dp[i-1][j-1]);
+    }
+  }
+  return dp[m][n];
+}
+
+/* Compares two voters' (prenom, nom). Returns a reason string if suspicious, else null. */
+function compareIdentities(vA, vB) {
+  const aFirst = normalizeName(vA.prenom), aLast = normalizeName(vA.nom);
+  const bFirst = normalizeName(vB.prenom), bLast = normalizeName(vB.nom);
+  if (!aFirst || !aLast || !bFirst || !bLast) return null;
+
+  const aFull = `${aFirst} ${aLast}`;
+  const bFull = `${bFirst} ${bLast}`;
+  if (aFull === bFull) return null; // exact same identity is handled by the timing-cluster detector
+
+  // 1. Reversed name order: "Brou Thomas" vs "Thomas Brou"
+  if (aFirst === bLast && aLast === bFirst) {
+    return "Noms inversés (prénom/nom échangés)";
+  }
+
+  // 2. Near-identical full name (typo), e.g. "Sory Affane" vs "Sorry Afane"
+  const dist = levenshtein(aFull, bFull);
+  const maxLen = Math.max(aFull.length, bFull.length);
+  if (dist > 0 && dist <= 2 && maxLen >= 6) {
+    return "Orthographe quasi-identique (faute de frappe probable)";
+  }
+
+  // 3. Reversed + typo combined: compare reversed-B against A
+  const bReversed = `${bLast} ${bFirst}`;
+  const distRev = levenshtein(aFull, bReversed);
+  if (distRev > 0 && distRev <= 2 && maxLen >= 6) {
+    return "Noms inversés avec légère variation d'orthographe";
+  }
+
+  return null;
+}
+
+
 export default function Admin() {
   const [authed, setAuthed] = useState(false);
   const [pwd, setPwd] = useState("");
@@ -129,6 +190,43 @@ export default function Admin() {
       const ids = new Set(group.votes.map(v => v.id));
       setVotes(prev => prev.map(v => ids.has(v.id) ? { ...v, ignoredSuspect: true } : v));
       showToast(`✅ Groupe ignoré — considéré comme légitime`);
+    } catch (e) {
+      console.error(e);
+      showToast("❌ Erreur");
+    }
+    setBusy(false);
+  }
+
+  /* ── CONFIRM a name-similarity pair as fraud (marks BOTH votes) ── */
+  async function confirmNamePair(pair) {
+    if (!confirm(`Marquer ces 2 votes comme frauduleux ?\n\n"${pair.a.prenom} ${pair.a.nom}" et "${pair.b.prenom} ${pair.b.nom}"`)) return;
+    setBusy(true);
+    try {
+      const batch = writeBatch(db);
+      batch.update(doc(db, "votes", pair.a.id), { fraud: true });
+      batch.update(doc(db, "votes", pair.b.id), { fraud: true });
+      await batch.commit();
+      const ids = new Set([pair.a.id, pair.b.id]);
+      setVotes(prev => prev.map(v => ids.has(v.id) ? { ...v, fraud: true } : v));
+      showToast(`🚩 2 votes confirmés comme fraude`);
+    } catch (e) {
+      console.error(e);
+      showToast("❌ Erreur");
+    }
+    setBusy(false);
+  }
+
+  /* ── IGNORE a name-similarity pair (mark both as legit) ── */
+  async function ignoreNamePair(pair) {
+    setBusy(true);
+    try {
+      const batch = writeBatch(db);
+      batch.update(doc(db, "votes", pair.a.id), { ignoredSuspect: true });
+      batch.update(doc(db, "votes", pair.b.id), { ignoredSuspect: true });
+      await batch.commit();
+      const ids = new Set([pair.a.id, pair.b.id]);
+      setVotes(prev => prev.map(v => ids.has(v.id) ? { ...v, ignoredSuspect: true } : v));
+      showToast(`✅ Paire ignorée — considérée comme légitime`);
     } catch (e) {
       console.error(e);
       showToast("❌ Erreur");
@@ -254,6 +352,30 @@ export default function Admin() {
   const suspectVoteIds = new Set(suspectGroups.flatMap(g => g.votes.map(v => v.id)));
   const suspectCount = suspectVoteIds.size;
 
+  /* ── NAME-SIMILARITY SUSPECT GROUPS ──
+     Pairs up voters whose identity looks like a duplicate (reversed, typo'd). */
+  const nameSuspectGroups = (() => {
+    const candidates = votes.filter(v => !v.fraud && !v.ignoredSuspect && v.prenom && v.nom);
+    const pairs = [];
+    const usedPairKeys = new Set();
+    for (let i = 0; i < candidates.length; i++) {
+      for (let j = i + 1; j < candidates.length; j++) {
+        const reason = compareIdentities(candidates[i], candidates[j]);
+        if (reason) {
+          const pairKey = [candidates[i].id, candidates[j].id].sort().join("|");
+          if (!usedPairKeys.has(pairKey)) {
+            usedPairKeys.add(pairKey);
+            pairs.push({ a: candidates[i], b: candidates[j], reason });
+          }
+        }
+      }
+    }
+    return pairs;
+  })();
+  const nameSuspectVoteIds = new Set(nameSuspectGroups.flatMap(p => [p.a.id, p.b.id]));
+  const nameSuspectCount = nameSuspectGroups.length;
+  const totalSuspectCount = suspectCount + nameSuspectVoteIds.size;
+
   const inputStyle = {
     width: "100%", background: G.s2, border: `1px solid ${G.br}`, borderRadius: 10,
     padding: "12px 16px", fontFamily: "'Montserrat',sans-serif", fontSize: 14,
@@ -296,10 +418,10 @@ export default function Admin() {
           Tableau de bord
         </h1>
         <p style={{ fontSize: 11, color: G.tm, textAlign: "center", marginTop: 2, marginBottom: 14 }}>
-          {votes.length} votes · {suspectCount} suspect(s) · {fraudVotes.length} fraude(s)
+          {votes.length} votes · {totalSuspectCount} suspect(s) · {fraudVotes.length} fraude(s)
         </p>
         <div style={{ display: "flex", background: G.s1, border: `1px solid ${G.br}`, borderRadius: 100, padding: 4, marginBottom: 14 }}>
-          {[["liste", `📋 Liste (${sorted.length})`], ["suspects", `⚠️ Suspects (${suspectCount})`], ["fraude", `🚩 Fraudes (${fraudVotes.length})`]].map(([k, lbl]) => (
+          {[["liste", `📋 Liste (${sorted.length})`], ["suspects", `⚠️ Suspects (${totalSuspectCount})`], ["fraude", `🚩 Fraudes (${fraudVotes.length})`]].map(([k, lbl]) => (
             <button key={k} onClick={() => setTab(k)} style={{
               flex: 1, padding: "10px 6px", borderRadius: 100, fontSize: 11, fontWeight: 500,
               border: "none", cursor: "pointer", transition: "all .25s",
@@ -387,7 +509,7 @@ export default function Admin() {
                         }}>{isChecked && "✓"}</div>
                         <div style={{ flex: 1, minWidth: 0 }}>
                           <div style={{ fontSize: 13.5, color: G.tx, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                            {v.prenom} {v.nom} {v.fraud && <span style={{ color: G.red }}>🚩</span>} {!v.fraud && suspectVoteIds.has(v.id) && <span style={{ color: "#f0a020" }}>⚠️</span>}
+                            {v.prenom} {v.nom} {v.fraud && <span style={{ color: G.red }}>🚩</span>} {!v.fraud && (suspectVoteIds.has(v.id) || nameSuspectVoteIds.has(v.id)) && <span style={{ color: "#f0a020" }}>⚠️</span>}
                           </div>
                           <div style={{ fontSize: 10.5, color: G.tm, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                             {v.niveau || "—"} · {v.dept || "—"} · ♚{nameOf(v.roi)} · ♛{nameOf(v.reine)}
@@ -412,7 +534,7 @@ export default function Admin() {
                           <div style={{ fontSize: 16, fontWeight: 500, color: G.tx }}>
                             {v.prenom} {v.nom}
                             {v.fraud && <span style={{ marginLeft: 8, fontSize: 11, color: G.red }}>🚩 fraude</span>}
-                            {!v.fraud && suspectVoteIds.has(v.id) && <span style={{ marginLeft: 8, fontSize: 11, color: "#f0a020" }}>⚠️ suspect</span>}
+                            {!v.fraud && (suspectVoteIds.has(v.id) || nameSuspectVoteIds.has(v.id)) && <span style={{ marginLeft: 8, fontSize: 11, color: "#f0a020" }}>⚠️ suspect</span>}
                           </div>
                           <div style={{ fontSize: 11, color: G.tm, marginTop: 2 }}>
                             {v.niveau || "—"} · {v.dept || "—"}
@@ -453,58 +575,100 @@ export default function Admin() {
           <div>
             <div style={{ background: G.s1, border: `1px solid ${G.br}`, borderRadius: 14, padding: 16, marginBottom: 16 }}>
               <p style={{ fontSize: 12.5, color: G.tm, lineHeight: 1.6 }}>
-                Détection automatique : votes <b style={{color:"#f0a020"}}>identiques</b> (même Roi + même Reine) arrivés à moins de <b>2 minutes</b> d'écart. Confirme si c'est une fraude, ou ignore si c'est légitime (amis votant ensemble par exemple).
+                Détection automatique sur deux critères : <b style={{color:"#f0a020"}}>votes identiques rapprochés</b> (même Roi+Reine, &lt;2 min) et <b style={{color:"#f0a020"}}>identités similaires</b> (noms inversés, fautes de frappe). Chaque cas indique sa raison. Confirme la fraude ou ignore si c'est légitime.
               </p>
             </div>
 
-            {suspectGroups.length === 0 ? (
+            {suspectGroups.length === 0 && nameSuspectGroups.length === 0 ? (
               <p style={{ textAlign: "center", color: G.tm, padding: 40 }}>✅ Aucun groupe suspect détecté</p>
             ) : (
-              <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                {suspectGroups.map((g, gi) => {
-                  const [roiId, reineId] = g.key.split("|");
-                  const first = g.votes[0].ts.seconds;
-                  const last = g.votes[g.votes.length - 1].ts.seconds;
-                  const spanSec = last - first;
-                  return (
-                    <div key={gi} style={{ background: "rgba(240,160,32,.06)", border: "1px solid rgba(240,160,32,.35)", borderRadius: 14, padding: "16px 16px" }}>
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
-                        <div>
+              <>
+                {suspectGroups.length > 0 && (
+                  <p style={{ fontFamily: "'Cormorant Garamond',serif", fontSize: 18, color: G.tx, marginBottom: 10 }}>
+                    🕐 Rafales de votes identiques
+                  </p>
+                )}
+                <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: nameSuspectGroups.length > 0 ? 22 : 0 }}>
+                  {suspectGroups.map((g, gi) => {
+                    const [roiId, reineId] = g.key.split("|");
+                    const first = g.votes[0].ts.seconds;
+                    const last = g.votes[g.votes.length - 1].ts.seconds;
+                    const spanSec = last - first;
+                    return (
+                      <div key={gi} style={{ background: "rgba(240,160,32,.06)", border: "1px solid rgba(240,160,32,.35)", borderRadius: 14, padding: "16px 16px" }}>
+                        <div style={{ marginBottom: 10 }}>
                           <div style={{ fontSize: 15, color: "#f0a020", fontWeight: 600 }}>
                             ⚠️ {g.votes.length} votes identiques
                           </div>
-                          <div style={{ fontSize: 12, color: G.tm, marginTop: 3 }}>
-                            ♚ {nameOf(roiId)} · ♛ {nameOf(reineId)}
+                          <div style={{ fontSize: 11.5, color: G.tx, marginTop: 4, fontStyle: "italic" }}>
+                            Pourquoi : même choix (♚ {nameOf(roiId)} · ♛ {nameOf(reineId)}) voté {g.votes.length} fois en seulement {spanSec < 60 ? `${spanSec} secondes` : `${Math.round(spanSec/60)} minutes`} — trop rapide pour des votes indépendants.
                           </div>
-                          <div style={{ fontSize: 11, color: G.tm, marginTop: 2 }}>
-                            Étalés sur {spanSec < 60 ? `${spanSec}s` : `${Math.round(spanSec/60)} min`}
-                          </div>
+                        </div>
+
+                        <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 12, maxHeight: 160, overflowY: "auto" }}>
+                          {g.votes.map(v => (
+                            <div key={v.id} style={{ fontSize: 11.5, color: G.tx, background: G.s2, borderRadius: 8, padding: "6px 10px", display: "flex", justifyContent: "space-between" }}>
+                              <span>{v.prenom} {v.nom} <span style={{color:G.tm}}>· {v.niveau || "—"}</span></span>
+                              <span style={{ color: G.tm }}>{new Date(v.ts.seconds * 1000).toLocaleTimeString("fr-FR")}</span>
+                            </div>
+                          ))}
+                        </div>
+
+                        <div style={{ display: "flex", gap: 8 }}>
+                          <button onClick={() => ignoreSuspectGroup(g)} disabled={busy} style={{
+                            flex: 1, padding: "10px", background: "transparent", border: `1px solid ${G.br}`,
+                            borderRadius: 10, color: G.tm, fontSize: 12, fontWeight: 500, cursor: "pointer"
+                          }}>✅ Légitime, ignorer</button>
+                          <button onClick={() => confirmSuspectGroup(g)} disabled={busy} style={{
+                            flex: 1, padding: "10px", background: "linear-gradient(135deg,#a02d20,#e74c3c)",
+                            border: "none", borderRadius: 10, color: "#fff", fontSize: 12, fontWeight: 600, cursor: "pointer"
+                          }}>🚩 Confirmer fraude</button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {nameSuspectGroups.length > 0 && (
+                  <p style={{ fontFamily: "'Cormorant Garamond',serif", fontSize: 18, color: G.tx, marginBottom: 10 }}>
+                    🔤 Identités similaires (doublons probables)
+                  </p>
+                )}
+                <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                  {nameSuspectGroups.map((pair, pi) => (
+                    <div key={pi} style={{ background: "rgba(240,160,32,.06)", border: "1px solid rgba(240,160,32,.35)", borderRadius: 14, padding: "16px 16px" }}>
+                      <div style={{ marginBottom: 10 }}>
+                        <div style={{ fontSize: 15, color: "#f0a020", fontWeight: 600 }}>
+                          ⚠️ Deux identités très proches
+                        </div>
+                        <div style={{ fontSize: 11.5, color: G.tx, marginTop: 4, fontStyle: "italic" }}>
+                          Pourquoi : {pair.reason}
                         </div>
                       </div>
 
-                      <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 12, maxHeight: 160, overflowY: "auto" }}>
-                        {g.votes.map(v => (
-                          <div key={v.id} style={{ fontSize: 11.5, color: G.tx, background: G.s2, borderRadius: 8, padding: "6px 10px", display: "flex", justifyContent: "space-between" }}>
-                            <span>{v.prenom} {v.nom} <span style={{color:G.tm}}>· {v.niveau || "—"}</span></span>
-                            <span style={{ color: G.tm }}>{new Date(v.ts.seconds * 1000).toLocaleTimeString("fr-FR")}</span>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 12 }}>
+                        {[pair.a, pair.b].map(v => (
+                          <div key={v.id} style={{ fontSize: 12, color: G.tx, background: G.s2, borderRadius: 8, padding: "8px 10px", display: "flex", justifyContent: "space-between" }}>
+                            <span><b>{v.prenom} {v.nom}</b> <span style={{color:G.tm}}>· {v.niveau || "—"} · {v.dept || "—"}</span></span>
+                            <span style={{ color: G.gold, fontSize: 11 }}>♚{nameOf(v.roi)} ♛{nameOf(v.reine)}</span>
                           </div>
                         ))}
                       </div>
 
                       <div style={{ display: "flex", gap: 8 }}>
-                        <button onClick={() => ignoreSuspectGroup(g)} disabled={busy} style={{
+                        <button onClick={() => ignoreNamePair(pair)} disabled={busy} style={{
                           flex: 1, padding: "10px", background: "transparent", border: `1px solid ${G.br}`,
                           borderRadius: 10, color: G.tm, fontSize: 12, fontWeight: 500, cursor: "pointer"
                         }}>✅ Légitime, ignorer</button>
-                        <button onClick={() => confirmSuspectGroup(g)} disabled={busy} style={{
+                        <button onClick={() => confirmNamePair(pair)} disabled={busy} style={{
                           flex: 1, padding: "10px", background: "linear-gradient(135deg,#a02d20,#e74c3c)",
                           border: "none", borderRadius: 10, color: "#fff", fontSize: 12, fontWeight: 600, cursor: "pointer"
                         }}>🚩 Confirmer fraude</button>
                       </div>
                     </div>
-                  );
-                })}
-              </div>
+                  ))}
+                </div>
+              </>
             )}
           </div>
         )}

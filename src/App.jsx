@@ -5,6 +5,7 @@ import {
 } from "firebase/firestore";
 import { signInAnonymously, onAuthStateChanged } from "firebase/auth";
 import { db, auth } from "./firebase";
+import { getDeviceFingerprint } from "./fingerprint";
 
 /* ── PALETTE ── */
 const G = {
@@ -317,22 +318,44 @@ function Modal({ selRoi, selReine, onClose, onSuccess, uid }) {
     setErrMsg(""); setLoading(true);
 
     try {
-      /* 1. Check already voted (server-side) */
+      /* 1. Generate device fingerprint — survives private/incognito mode,
+            unlike localStorage or the anonymous auth uid */
+      const fingerprint = await getDeviceFingerprint();
+
+      /* 2. Check already voted — by uid AND by fingerprint */
       const vRef = doc(db, "votes", uid);
       const vSnap = await getDoc(vRef);
       if (vSnap.exists()) { setErrMsg("Vous avez déjà voté."); setLoading(false); return; }
 
-      /* 2. Increment counters atomically */
+      if (fingerprint) {
+        const fpRef = doc(db, "deviceVotes", fingerprint);
+        const fpSnap = await getDoc(fpRef);
+        if (fpSnap.exists()) {
+          setErrMsg("Un vote a déjà été enregistré depuis cet appareil.");
+          setLoading(false);
+          return;
+        }
+      }
+
+      /* 3. Increment counters atomically */
       await updateDoc(doc(db, "counts", "rois"),   { [selRoi]:   increment(1) });
       await updateDoc(doc(db, "counts", "reines"), { [selReine]: increment(1) });
 
-      /* 3. Record vote (prevents double vote) */
+      /* 4. Record vote (prevents double vote by uid) */
       await setDoc(vRef, {
         uid, roi: selRoi, reine: selReine,
         prenom: form.prenom.trim(), nom: form.nom.trim(),
         niveau: form.niveau, dept: form.dept.trim(),
+        fingerprint: fingerprint || null,
         ts: serverTimestamp()
       });
+
+      /* 5. Record device fingerprint lock (prevents double vote by device) */
+      if (fingerprint) {
+        await setDoc(doc(db, "deviceVotes", fingerprint), {
+          uid, votedAt: serverTimestamp()
+        });
+      }
 
       onSuccess(selRoi, selReine);
     } catch (err) {
@@ -479,14 +502,34 @@ export default function App() {
   const [success, setSuccess]   = useState(false);
   const [loading, setLoading]   = useState(true);
 
-  /* ── AUTH anonyme ── */
+  /* ── AUTH anonyme + vérification empreinte appareil ── */
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async user => {
       if (user) {
         setUid(user.uid);
-        /* check already voted */
+
+        /* check already voted by uid */
         const vSnap = await getDoc(doc(db, "votes", user.uid));
-        if (vSnap.exists()) setVoted({ roi: vSnap.data().roi, reine: vSnap.data().reine });
+        if (vSnap.exists()) {
+          setVoted({ roi: vSnap.data().roi, reine: vSnap.data().reine });
+          return;
+        }
+
+        /* check already voted by device fingerprint (catches incognito mode) */
+        const fingerprint = await getDeviceFingerprint();
+        if (fingerprint) {
+          const fpSnap = await getDoc(doc(db, "deviceVotes", fingerprint));
+          if (fpSnap.exists()) {
+            /* device already voted under a different uid — block here too */
+            const otherUid = fpSnap.data().uid;
+            const otherVoteSnap = await getDoc(doc(db, "votes", otherUid));
+            if (otherVoteSnap.exists()) {
+              setVoted({ roi: otherVoteSnap.data().roi, reine: otherVoteSnap.data().reine });
+            } else {
+              setVoted({ roi: null, reine: null }); // locked, details unknown
+            }
+          }
+        }
       } else {
         await signInAnonymously(auth);
       }
