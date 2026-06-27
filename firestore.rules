@@ -25,5 +25,13 @@ service cloud.firestore {
       allow delete: if true; // admin peut débloquer un appareil si besoin
       allow update: if false;
     }
+
+    // Tentatives refusées — log des essais de double-vote détectés,
+    // utile pour identifier les tricheurs qui changent juste de nom
+    match /rejectedAttempts/{id} {
+      allow read, delete: if true;
+      allow create: if request.auth != null;
+      allow update: if false;
+    }
   }
 }
