@@ -203,7 +203,29 @@ export default function Admin() {
     setBusy(false);
   }
 
-  /* ── CONFIRM a name-similarity pair as fraud (marks BOTH votes) ── */
+  /* ── For a similar-name pair: keep ONE vote as legit, mark the OTHER as fraud ── */
+  async function keepOneMarkOtherFraud(keepId, fraudId, keepName, fraudName) {
+    if (!confirm(`Garder le vote de "${keepName}" comme valide\net marquer "${fraudName}" comme frauduleux ?`)) return;
+    setBusy(true);
+    try {
+      const batch = writeBatch(db);
+      batch.update(doc(db, "votes", keepId), { ignoredSuspect: true });
+      batch.update(doc(db, "votes", fraudId), { fraud: true });
+      await batch.commit();
+      setVotes(prev => prev.map(v => {
+        if (v.id === keepId) return { ...v, ignoredSuspect: true };
+        if (v.id === fraudId) return { ...v, fraud: true };
+        return v;
+      }));
+      showToast(`✅ "${keepName}" gardé · 🚩 "${fraudName}" marqué fraude`);
+    } catch (e) {
+      console.error(e);
+      showToast("❌ Erreur");
+    }
+    setBusy(false);
+  }
+
+  /* ── Mark BOTH votes in a pair as fraud (when neither looks legit) ── */
   async function confirmNamePair(pair) {
     if (!confirm(`Marquer ces 2 votes comme frauduleux ?\n\n"${pair.a.prenom} ${pair.a.nom}" et "${pair.b.prenom} ${pair.b.nom}"`)) return;
     setBusy(true);
@@ -222,7 +244,7 @@ export default function Admin() {
     setBusy(false);
   }
 
-  /* ── IGNORE a name-similarity pair (mark both as legit) ── */
+  /* ── IGNORE a name-similarity pair (mark both as legit — false alarm) ── */
   async function ignoreNamePair(pair) {
     setBusy(true);
     try {
@@ -326,13 +348,13 @@ export default function Admin() {
     if (v.reine) fraudByCandidat[v.reine] = (fraudByCandidat[v.reine] || 0) + 1;
   });
 
-  /* ── TIMING-REGULARITY SUSPECT DETECTION ──
-     Instead of a fixed "< 2 minutes" window (which flags normal crowd voting
-     for a popular candidate), we look for REGULARITY: humans voting
-     independently produce irregular gaps (15s, 47s, 8s...). A script or
-     someone repeating the same vote produces very even gaps.
-     We group by identical (roi, reine) pair, then flag runs of 3+ votes
-     whose consecutive gaps have low variance relative to their average. */
+  /* ── RAFALE DETECTION (proximity-based, regularity as bonus signal) ──
+     Catches clusters of 2+ identical (roi, reine) votes within a short
+     window. Window is generous (90s) to catch real rafales, since requiring
+     long runs + low variance was too strict and missed real fraud bursts.
+     Regularity (even spacing) is tracked per group and shown as extra
+     context — it boosts suspicion but isn't required to flag a group. */
+  const RAFALE_WINDOW = 90; // seconds between consecutive votes to count as same burst
   const suspectGroups = (() => {
     const candidates = votes.filter(v => !v.fraud && !v.ignoredSuspect && v.ts?.seconds);
     const byPair = {};
@@ -342,32 +364,35 @@ export default function Admin() {
     });
     const groups = [];
     Object.entries(byPair).forEach(([key, list]) => {
-      if (list.length < 3) return; // need at least 3 votes to measure regularity
+      if (list.length < 2) return;
       const sortedList = [...list].sort((a, b) => a.ts.seconds - b.ts.seconds);
-      // sliding window of 3: check gap regularity
-      for (let i = 0; i + 2 < sortedList.length; i++) {
-        const windowVotes = [sortedList[i], sortedList[i+1], sortedList[i+2]];
-        const gaps = [windowVotes[1].ts.seconds - windowVotes[0].ts.seconds,
-                      windowVotes[2].ts.seconds - windowVotes[1].ts.seconds];
-        const avg = (gaps[0] + gaps[1]) / 2;
-        if (avg <= 0 || avg > 600) continue; // ignore gaps > 10min apart, not a "rafale"
-        const variance = Math.abs(gaps[0] - gaps[1]);
-        const regularityRatio = variance / avg; // low ratio = very regular = suspicious
-        if (regularityRatio < 0.35 && avg < 180) {
-          // extend the cluster forward as long as regularity holds
-          let cluster = [...windowVotes];
-          let j = i + 3;
-          while (j < sortedList.length) {
-            const gap = sortedList[j].ts.seconds - sortedList[j-1].ts.seconds;
-            if (gap > 0 && gap < 180 && Math.abs(gap - avg) / avg < 0.5) {
-              cluster.push(sortedList[j]); j++;
-            } else break;
-          }
-          groups.push({ key, votes: cluster, avgGap: avg, regularityRatio });
-          break; // move to next pair, avoid overlapping duplicate clusters
+      let cluster = [sortedList[0]];
+      for (let i = 1; i < sortedList.length; i++) {
+        const gap = sortedList[i].ts.seconds - sortedList[i - 1].ts.seconds;
+        if (gap <= RAFALE_WINDOW) {
+          cluster.push(sortedList[i]);
+        } else {
+          if (cluster.length >= 2) groups.push(buildGroup(key, cluster));
+          cluster = [sortedList[i]];
         }
       }
+      if (cluster.length >= 2) groups.push(buildGroup(key, cluster));
     });
+
+    function buildGroup(key, clusterVotes) {
+      const gaps = [];
+      for (let k = 1; k < clusterVotes.length; k++) {
+        gaps.push(clusterVotes[k].ts.seconds - clusterVotes[k-1].ts.seconds);
+      }
+      const avgGap = gaps.reduce((a,b)=>a+b,0) / gaps.length;
+      const variance = gaps.length > 1
+        ? gaps.reduce((a,g)=>a+Math.abs(g-avgGap),0) / gaps.length
+        : 0;
+      const regularityRatio = avgGap > 0 ? variance / avgGap : 1;
+      const isRegular = regularityRatio < 0.4 && clusterVotes.length >= 3;
+      return { key, votes: clusterVotes, avgGap, regularityRatio, isRegular };
+    }
+
     return groups.sort((a, b) => b.votes.length - a.votes.length);
   })();
   const suspectVoteIds = new Set(suspectGroups.flatMap(g => g.votes.map(v => v.id)));
@@ -423,12 +448,16 @@ export default function Admin() {
     const scores = {};
     votes.forEach(v => { scores[v.id] = { score: 0, reasons: [] }; });
 
-    // signal 1: timing-regularity cluster membership
+    // signal 1: rafale (proximity burst), with bonus if timing is suspiciously regular
     suspectGroups.forEach(g => {
+      const baseScore = g.isRegular ? 40 : 25;
+      const reason = g.isRegular
+        ? `Rafale à rythme constant (${g.votes.length} votes, ~${Math.round(g.avgGap)}s d'écart régulier)`
+        : `Rafale rapprochée (${g.votes.length} votes pour le même choix en moins de ${Math.round((g.votes.length-1)*g.avgGap/60) || 1} min)`;
       g.votes.forEach(v => {
         if (scores[v.id]) {
-          scores[v.id].score += 35;
-          scores[v.id].reasons.push(`Rafale régulière (${g.votes.length} votes, ~${Math.round(g.avgGap)}s d'écart constant)`);
+          scores[v.id].score += baseScore;
+          scores[v.id].reasons.push(reason);
         }
       });
     });
@@ -738,6 +767,33 @@ export default function Admin() {
                           ))}
                         </div>
 
+                        {/* If this vote is part of a name-similarity pair, offer a direct
+                            "keep this one, the other is fraud" shortcut right here */}
+                        {(() => {
+                          const twinPair = nameSuspectGroups.find(p => p.a.id === v.id || p.b.id === v.id);
+                          if (!twinPair) return null;
+                          const twin = twinPair.a.id === v.id ? twinPair.b : twinPair.a;
+                          return (
+                            <div style={{
+                              background: "rgba(95,184,120,.06)", border: "1px solid rgba(95,184,120,.25)",
+                              borderRadius: 10, padding: "10px 12px", marginBottom: 10
+                            }}>
+                              <div style={{ fontSize: 11, color: G.tm, marginBottom: 7 }}>
+                                Identité jumelle détectée : <b style={{color:G.tx}}>{twin.prenom} {twin.nom}</b>
+                              </div>
+                              <button
+                                onClick={() => keepOneMarkOtherFraud(v.id, twin.id, `${v.prenom} ${v.nom}`, `${twin.prenom} ${twin.nom}`)}
+                                disabled={busy}
+                                style={{
+                                  width: "100%", padding: "8px", background: "rgba(95,184,120,.12)",
+                                  border: "1px solid rgba(95,184,120,.45)", borderRadius: 8,
+                                  color: "#5fb878", fontSize: 11, fontWeight: 500, cursor: "pointer"
+                                }}
+                              >✓ Garder {v.prenom}, marquer {twin.prenom} comme fraude</button>
+                            </div>
+                          );
+                        })()}
+
                         <div style={{ display: "flex", gap: 8 }}>
                           <button onClick={async () => {
                               setBusy(true);
@@ -782,20 +838,29 @@ export default function Admin() {
 
                 {suspectGroups.length > 0 && (
                   <p style={{ fontFamily: "'Cormorant Garamond',serif", fontSize: 18, color: G.tx, marginBottom: 10 }}>
-                    🕐 Rafales à intervalle régulier
+                    🕐 Rafales de votes rapprochés
                   </p>
                 )}
                 <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: nameSuspectGroups.length > 0 ? 22 : 0 }}>
                   {suspectGroups.map((g, gi) => {
                     const [roiId, reineId] = g.key.split("|");
+                    const totalSpan = g.votes[g.votes.length-1].ts.seconds - g.votes[0].ts.seconds;
                     return (
                       <div key={gi} style={{ background: "rgba(240,160,32,.06)", border: "1px solid rgba(240,160,32,.35)", borderRadius: 14, padding: "16px 16px" }}>
                         <div style={{ marginBottom: 10 }}>
-                          <div style={{ fontSize: 15, color: "#f0a020", fontWeight: 600 }}>
-                            ⚠️ {g.votes.length} votes à rythme constant
+                          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                            <span style={{ fontSize: 15, color: "#f0a020", fontWeight: 600 }}>
+                              ⚠️ {g.votes.length} votes rapprochés
+                            </span>
+                            {g.isRegular && (
+                              <span style={{ fontSize: 10, color: G.red, background: "rgba(231,76,60,.12)", border: "1px solid rgba(231,76,60,.3)", borderRadius: 100, padding: "2px 8px" }}>
+                                🤖 rythme suspect
+                              </span>
+                            )}
                           </div>
                           <div style={{ fontSize: 11.5, color: G.tx, marginTop: 4, fontStyle: "italic" }}>
-                            Pourquoi : même choix (♚ {nameOf(roiId)} · ♛ {nameOf(reineId)}) voté avec un écart quasi-identique d'environ {Math.round(g.avgGap)}s entre chaque vote — ce niveau de régularité est rare chez des votants indépendants.
+                            Pourquoi : même choix (♚ {nameOf(roiId)} · ♛ {nameOf(reineId)}) voté {g.votes.length} fois en {totalSpan < 60 ? `${totalSpan}s` : `${Math.round(totalSpan/60)} min`}
+                            {g.isRegular ? `, avec un écart presque constant d'environ ${Math.round(g.avgGap)}s entre chaque vote — ce rythme mécanique est rare chez des votants indépendants.` : "."}
                           </div>
                         </div>
 
@@ -831,7 +896,7 @@ export default function Admin() {
                 <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: linkedRejections.length > 0 ? 22 : 0 }}>
                   {nameSuspectGroups.map((pair, pi) => (
                     <div key={pi} style={{ background: "rgba(240,160,32,.06)", border: "1px solid rgba(240,160,32,.35)", borderRadius: 14, padding: "16px 16px" }}>
-                      <div style={{ marginBottom: 10 }}>
+                      <div style={{ marginBottom: 12 }}>
                         <div style={{ fontSize: 15, color: "#f0a020", fontWeight: 600 }}>
                           ⚠️ Deux identités très proches
                         </div>
@@ -840,24 +905,41 @@ export default function Admin() {
                         </div>
                       </div>
 
-                      <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 12 }}>
-                        {[pair.a, pair.b].map(v => (
-                          <div key={v.id} style={{ fontSize: 12, color: G.tx, background: G.s2, borderRadius: 8, padding: "8px 10px", display: "flex", justifyContent: "space-between" }}>
-                            <span><b>{v.prenom} {v.nom}</b> <span style={{color:G.tm}}>· {v.niveau || "—"} · {v.dept || "—"}</span></span>
-                            <span style={{ color: G.gold, fontSize: 11 }}>♚{nameOf(v.roi)} ♛{nameOf(v.reine)}</span>
+                      {/* Each voter gets their own row with a dedicated "keep this one" action */}
+                      <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 12 }}>
+                        {[[pair.a, pair.b], [pair.b, pair.a]].map(([v, other]) => (
+                          <div key={v.id} style={{ background: G.s2, borderRadius: 10, padding: "10px 12px" }}>
+                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                              <span style={{ fontSize: 12.5, color: G.tx }}>
+                                <b>{v.prenom} {v.nom}</b> <span style={{color:G.tm}}>· {v.niveau || "—"} · {v.dept || "—"}</span>
+                              </span>
+                            </div>
+                            <div style={{ fontSize: 10.5, color: G.gold, marginBottom: 8 }}>
+                              ♚ {nameOf(v.roi)} · ♛ {nameOf(v.reine)}
+                            </div>
+                            <button
+                              onClick={() => keepOneMarkOtherFraud(v.id, other.id, `${v.prenom} ${v.nom}`, `${other.prenom} ${other.nom}`)}
+                              disabled={busy}
+                              style={{
+                                width: "100%", padding: "8px", background: "rgba(95,184,120,.1)",
+                                border: "1px solid rgba(95,184,120,.4)", borderRadius: 8,
+                                color: "#5fb878", fontSize: 11, fontWeight: 500, cursor: "pointer"
+                              }}
+                            >✓ Garder celui-ci, l'autre est fraude</button>
                           </div>
                         ))}
                       </div>
 
+                      {/* Global actions when neither/both apply */}
                       <div style={{ display: "flex", gap: 8 }}>
                         <button onClick={() => ignoreNamePair(pair)} disabled={busy} style={{
-                          flex: 1, padding: "10px", background: "transparent", border: `1px solid ${G.br}`,
-                          borderRadius: 10, color: G.tm, fontSize: 12, fontWeight: 500, cursor: "pointer"
-                        }}>✅ Légitime, ignorer</button>
+                          flex: 1, padding: "9px", background: "transparent", border: `1px solid ${G.br}`,
+                          borderRadius: 10, color: G.tm, fontSize: 11.5, fontWeight: 500, cursor: "pointer"
+                        }}>✅ Les deux sont légitimes</button>
                         <button onClick={() => confirmNamePair(pair)} disabled={busy} style={{
-                          flex: 1, padding: "10px", background: "linear-gradient(135deg,#a02d20,#e74c3c)",
-                          border: "none", borderRadius: 10, color: "#fff", fontSize: 12, fontWeight: 600, cursor: "pointer"
-                        }}>🚩 Confirmer fraude</button>
+                          flex: 1, padding: "9px", background: "linear-gradient(135deg,#a02d20,#e74c3c)",
+                          border: "none", borderRadius: 10, color: "#fff", fontSize: 11.5, fontWeight: 600, cursor: "pointer"
+                        }}>🚩 Les deux sont fraude</button>
                       </div>
                     </div>
                   ))}
