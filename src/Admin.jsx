@@ -101,6 +101,41 @@ export default function Admin() {
     setBusy(false);
   }
 
+  /* ── CONFIRM a suspect group as fraud (batch) ── */
+  async function confirmSuspectGroup(group) {
+    if (!confirm(`Marquer ces ${group.votes.length} votes comme frauduleux ?`)) return;
+    setBusy(true);
+    try {
+      const batch = writeBatch(db);
+      group.votes.forEach(v => batch.update(doc(db, "votes", v.id), { fraud: true }));
+      await batch.commit();
+      const ids = new Set(group.votes.map(v => v.id));
+      setVotes(prev => prev.map(v => ids.has(v.id) ? { ...v, fraud: true } : v));
+      showToast(`🚩 ${group.votes.length} vote(s) confirmé(s) comme fraude`);
+    } catch (e) {
+      console.error(e);
+      showToast("❌ Erreur lors de la confirmation");
+    }
+    setBusy(false);
+  }
+
+  /* ── IGNORE a suspect group (mark as legit, stop flagging) ── */
+  async function ignoreSuspectGroup(group) {
+    setBusy(true);
+    try {
+      const batch = writeBatch(db);
+      group.votes.forEach(v => batch.update(doc(db, "votes", v.id), { ignoredSuspect: true }));
+      await batch.commit();
+      const ids = new Set(group.votes.map(v => v.id));
+      setVotes(prev => prev.map(v => ids.has(v.id) ? { ...v, ignoredSuspect: true } : v));
+      showToast(`✅ Groupe ignoré — considéré comme légitime`);
+    } catch (e) {
+      console.error(e);
+      showToast("❌ Erreur");
+    }
+    setBusy(false);
+  }
+
   /* ── DELETE PERMANENTLY ── */
   async function deleteVote(v) {
     if (!confirm(`Supprimer définitivement le vote de "${v.prenom} ${v.nom}" ?\n\nVote pour : ${nameOf(v.roi)} & ${nameOf(v.reine)}`)) return;
@@ -187,6 +222,38 @@ export default function Admin() {
     if (v.reine) fraudByCandidat[v.reine] = (fraudByCandidat[v.reine] || 0) + 1;
   });
 
+  /* ── SUSPECT DETECTION ──
+     Groups non-fraud, non-ignored votes by identical (roi, reine) pair,
+     then finds clusters where consecutive votes are < 2 min apart.
+     A cluster of 2+ such votes = suspect group. */
+  const SUSPECT_WINDOW = 120; // seconds
+  const suspectGroups = (() => {
+    const candidates = votes.filter(v => !v.fraud && !v.ignoredSuspect && v.ts?.seconds);
+    const byPair = {};
+    candidates.forEach(v => {
+      const key = `${v.roi}|${v.reine}`;
+      (byPair[key] = byPair[key] || []).push(v);
+    });
+    const groups = [];
+    Object.entries(byPair).forEach(([key, list]) => {
+      const sortedList = [...list].sort((a, b) => a.ts.seconds - b.ts.seconds);
+      let cluster = [sortedList[0]];
+      for (let i = 1; i < sortedList.length; i++) {
+        const gap = sortedList[i].ts.seconds - sortedList[i - 1].ts.seconds;
+        if (gap <= SUSPECT_WINDOW) {
+          cluster.push(sortedList[i]);
+        } else {
+          if (cluster.length >= 2) groups.push({ key, votes: cluster });
+          cluster = [sortedList[i]];
+        }
+      }
+      if (cluster.length >= 2) groups.push({ key, votes: cluster });
+    });
+    return groups.sort((a, b) => b.votes.length - a.votes.length);
+  })();
+  const suspectVoteIds = new Set(suspectGroups.flatMap(g => g.votes.map(v => v.id)));
+  const suspectCount = suspectVoteIds.size;
+
   const inputStyle = {
     width: "100%", background: G.s2, border: `1px solid ${G.br}`, borderRadius: 10,
     padding: "12px 16px", fontFamily: "'Montserrat',sans-serif", fontSize: 14,
@@ -229,12 +296,12 @@ export default function Admin() {
           Tableau de bord
         </h1>
         <p style={{ fontSize: 11, color: G.tm, textAlign: "center", marginTop: 2, marginBottom: 14 }}>
-          {votes.length} votes · {fraudVotes.length} marqué(s) frauduleux
+          {votes.length} votes · {suspectCount} suspect(s) · {fraudVotes.length} fraude(s)
         </p>
         <div style={{ display: "flex", background: G.s1, border: `1px solid ${G.br}`, borderRadius: 100, padding: 4, marginBottom: 14 }}>
-          {[["liste", `📋 Liste (${sorted.length})`], ["fraude", `🚩 Fraudes (${fraudVotes.length})`]].map(([k, lbl]) => (
+          {[["liste", `📋 Liste (${sorted.length})`], ["suspects", `⚠️ Suspects (${suspectCount})`], ["fraude", `🚩 Fraudes (${fraudVotes.length})`]].map(([k, lbl]) => (
             <button key={k} onClick={() => setTab(k)} style={{
-              flex: 1, padding: "10px 8px", borderRadius: 100, fontSize: 12, fontWeight: 500,
+              flex: 1, padding: "10px 6px", borderRadius: 100, fontSize: 11, fontWeight: 500,
               border: "none", cursor: "pointer", transition: "all .25s",
               background: tab === k ? `linear-gradient(135deg,${G.goldD},${G.gold})` : "transparent",
               color: tab === k ? G.black : G.tm
@@ -320,7 +387,7 @@ export default function Admin() {
                         }}>{isChecked && "✓"}</div>
                         <div style={{ flex: 1, minWidth: 0 }}>
                           <div style={{ fontSize: 13.5, color: G.tx, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                            {v.prenom} {v.nom} {v.fraud && <span style={{ color: G.red }}>🚩</span>}
+                            {v.prenom} {v.nom} {v.fraud && <span style={{ color: G.red }}>🚩</span>} {!v.fraud && suspectVoteIds.has(v.id) && <span style={{ color: "#f0a020" }}>⚠️</span>}
                           </div>
                           <div style={{ fontSize: 10.5, color: G.tm, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                             {v.niveau || "—"} · {v.dept || "—"} · ♚{nameOf(v.roi)} · ♛{nameOf(v.reine)}
@@ -345,6 +412,7 @@ export default function Admin() {
                           <div style={{ fontSize: 16, fontWeight: 500, color: G.tx }}>
                             {v.prenom} {v.nom}
                             {v.fraud && <span style={{ marginLeft: 8, fontSize: 11, color: G.red }}>🚩 fraude</span>}
+                            {!v.fraud && suspectVoteIds.has(v.id) && <span style={{ marginLeft: 8, fontSize: 11, color: "#f0a020" }}>⚠️ suspect</span>}
                           </div>
                           <div style={{ fontSize: 11, color: G.tm, marginTop: 2 }}>
                             {v.niveau || "—"} · {v.dept || "—"}
@@ -378,6 +446,67 @@ export default function Admin() {
               </div>
             )}
           </>
+        )}
+
+        {/* ════ TAB: SUSPECTS ════ */}
+        {tab === "suspects" && (
+          <div>
+            <div style={{ background: G.s1, border: `1px solid ${G.br}`, borderRadius: 14, padding: 16, marginBottom: 16 }}>
+              <p style={{ fontSize: 12.5, color: G.tm, lineHeight: 1.6 }}>
+                Détection automatique : votes <b style={{color:"#f0a020"}}>identiques</b> (même Roi + même Reine) arrivés à moins de <b>2 minutes</b> d'écart. Confirme si c'est une fraude, ou ignore si c'est légitime (amis votant ensemble par exemple).
+              </p>
+            </div>
+
+            {suspectGroups.length === 0 ? (
+              <p style={{ textAlign: "center", color: G.tm, padding: 40 }}>✅ Aucun groupe suspect détecté</p>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                {suspectGroups.map((g, gi) => {
+                  const [roiId, reineId] = g.key.split("|");
+                  const first = g.votes[0].ts.seconds;
+                  const last = g.votes[g.votes.length - 1].ts.seconds;
+                  const spanSec = last - first;
+                  return (
+                    <div key={gi} style={{ background: "rgba(240,160,32,.06)", border: "1px solid rgba(240,160,32,.35)", borderRadius: 14, padding: "16px 16px" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
+                        <div>
+                          <div style={{ fontSize: 15, color: "#f0a020", fontWeight: 600 }}>
+                            ⚠️ {g.votes.length} votes identiques
+                          </div>
+                          <div style={{ fontSize: 12, color: G.tm, marginTop: 3 }}>
+                            ♚ {nameOf(roiId)} · ♛ {nameOf(reineId)}
+                          </div>
+                          <div style={{ fontSize: 11, color: G.tm, marginTop: 2 }}>
+                            Étalés sur {spanSec < 60 ? `${spanSec}s` : `${Math.round(spanSec/60)} min`}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 12, maxHeight: 160, overflowY: "auto" }}>
+                        {g.votes.map(v => (
+                          <div key={v.id} style={{ fontSize: 11.5, color: G.tx, background: G.s2, borderRadius: 8, padding: "6px 10px", display: "flex", justifyContent: "space-between" }}>
+                            <span>{v.prenom} {v.nom} <span style={{color:G.tm}}>· {v.niveau || "—"}</span></span>
+                            <span style={{ color: G.tm }}>{new Date(v.ts.seconds * 1000).toLocaleTimeString("fr-FR")}</span>
+                          </div>
+                        ))}
+                      </div>
+
+                      <div style={{ display: "flex", gap: 8 }}>
+                        <button onClick={() => ignoreSuspectGroup(g)} disabled={busy} style={{
+                          flex: 1, padding: "10px", background: "transparent", border: `1px solid ${G.br}`,
+                          borderRadius: 10, color: G.tm, fontSize: 12, fontWeight: 500, cursor: "pointer"
+                        }}>✅ Légitime, ignorer</button>
+                        <button onClick={() => confirmSuspectGroup(g)} disabled={busy} style={{
+                          flex: 1, padding: "10px", background: "linear-gradient(135deg,#a02d20,#e74c3c)",
+                          border: "none", borderRadius: 10, color: "#fff", fontSize: 12, fontWeight: 600, cursor: "pointer"
+                        }}>🚩 Confirmer fraude</button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         )}
 
         {/* ════ TAB: FRAUDE ════ */}
