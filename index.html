@@ -1,20 +1,14 @@
-rules_version = '2';
-service cloud.firestore {
-  match /databases/{database}/documents {
-
-    // Counts — lecture publique, écriture authentifiée (vote normal)
-    // ou ouverte pour les ajustements admin (pénalités)
-    match /counts/{doc} {
-      allow read: if true;
-      allow write: if true;
-    }
-
-    // Votes — chaque user écrit son propre doc à la création
-    // Lecture/suppression/mise à jour ouvertes pour le tableau de bord admin
-    // (protégé par mot de passe côté app, pas par les règles Firestore)
-    match /votes/{uid} {
-      allow read, delete, update: if true;
-      allow create: if request.auth != null && request.auth.uid == uid;
-    }
-  }
-}
+<!DOCTYPE html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>La Nuit des Éclats — Vote Roi &amp; Reine</title>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>♛</text></svg>" />
+    <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400;1,600&family=Montserrat:wght@300;400;500;600&display=swap" rel="stylesheet" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
