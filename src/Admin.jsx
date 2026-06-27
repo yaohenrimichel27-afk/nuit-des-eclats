@@ -39,6 +39,9 @@ export default function Admin() {
   const [toast, setToast] = useState("");
   const [busy, setBusy] = useState(false);
   const [penalties, setPenalties] = useState({}); // candidatId -> custom penalty value
+  const [sortKey, setSortKey] = useState("date");   // nom | date | niveau | dept
+  const [sortDir, setSortDir] = useState("desc");
+  const [compact, setCompact] = useState(false);
 
   useEffect(() => { if (authed) loadVotes(); }, [authed]);
 
@@ -149,7 +152,32 @@ export default function Admin() {
       (v.dept || "").toLowerCase().includes(s) ||
       nameOf(v.roi).toLowerCase().includes(s) ||
       nameOf(v.reine).toLowerCase().includes(s);
-  }).sort((a, b) => (b.ts?.seconds || 0) - (a.ts?.seconds || 0));
+  });
+
+  const sorted = [...filtered].sort((a, b) => {
+    let av, bv;
+    if (sortKey === "date") { av = a.ts?.seconds || 0; bv = b.ts?.seconds || 0; }
+    else if (sortKey === "nom")    { av = `${a.nom||""} ${a.prenom||""}`.toLowerCase(); bv = `${b.nom||""} ${b.prenom||""}`.toLowerCase(); }
+    else if (sortKey === "niveau") { av = (a.niveau||"").toLowerCase(); bv = (b.niveau||"").toLowerCase(); }
+    else if (sortKey === "dept")   { av = (a.dept||"").toLowerCase(); bv = (b.dept||"").toLowerCase(); }
+    if (av < bv) return sortDir === "asc" ? -1 : 1;
+    if (av > bv) return sortDir === "asc" ? 1 : -1;
+    return 0;
+  });
+
+  function toggleSort(key) {
+    if (sortKey === key) setSortDir(d => d === "asc" ? "desc" : "asc");
+    else { setSortKey(key); setSortDir(key === "date" ? "desc" : "asc"); }
+  }
+
+  function selectAllVisible() {
+    setSelected(prev => {
+      const next = new Set(prev);
+      const allIn = sorted.every(v => next.has(v.id));
+      sorted.forEach(v => allIn ? next.delete(v.id) : next.add(v.id));
+      return next;
+    });
+  }
 
   const fraudVotes = votes.filter(v => v.fraud);
   const fraudByCandidat = {};
@@ -204,7 +232,7 @@ export default function Admin() {
           {votes.length} votes · {fraudVotes.length} marqué(s) frauduleux
         </p>
         <div style={{ display: "flex", background: G.s1, border: `1px solid ${G.br}`, borderRadius: 100, padding: 4, marginBottom: 14 }}>
-          {[["liste", `📋 Liste (${filtered.length})`], ["fraude", `🚩 Fraudes (${fraudVotes.length})`]].map(([k, lbl]) => (
+          {[["liste", `📋 Liste (${sorted.length})`], ["fraude", `🚩 Fraudes (${fraudVotes.length})`]].map(([k, lbl]) => (
             <button key={k} onClick={() => setTab(k)} style={{
               flex: 1, padding: "10px 8px", borderRadius: 100, fontSize: 12, fontWeight: 500,
               border: "none", cursor: "pointer", transition: "all .25s",
@@ -230,15 +258,81 @@ export default function Admin() {
               value={search}
               onChange={e => setSearch(e.target.value)}
               placeholder="🔍 Rechercher un nom, candidat..."
-              style={{ ...inputStyle, marginBottom: 14, fontSize: 15 }}
+              style={{ ...inputStyle, marginBottom: 10, fontSize: 15 }}
             />
+
+            {/* SORT BAR */}
+            <div style={{ display: "flex", gap: 6, marginBottom: 10, overflowX: "auto", paddingBottom: 2 }}>
+              {[["date","🕐 Date"], ["nom","🔤 Nom"], ["niveau","🎓 Niveau"], ["dept","🏛️ Dépt"]].map(([k, lbl]) => (
+                <button key={k} onClick={() => toggleSort(k)} style={{
+                  flexShrink: 0, padding: "8px 14px", borderRadius: 100, fontSize: 11.5, fontWeight: 500,
+                  border: `1px solid ${sortKey === k ? G.gold : G.br}`, cursor: "pointer",
+                  background: sortKey === k ? "rgba(201,168,76,.15)" : G.s1,
+                  color: sortKey === k ? G.goldL : G.tm, whiteSpace: "nowrap"
+                }}>
+                  {lbl} {sortKey === k && (sortDir === "asc" ? "↑" : "↓")}
+                </button>
+              ))}
+              <button onClick={() => setCompact(c => !c)} style={{
+                flexShrink: 0, padding: "8px 14px", borderRadius: 100, fontSize: 11.5, fontWeight: 500,
+                border: `1px solid ${G.br}`, cursor: "pointer", background: G.s1, color: G.tm, whiteSpace: "nowrap"
+              }}>
+                {compact ? "🔍 Détaillé" : "📐 Compact"}
+              </button>
+            </div>
+
+            {/* SELECT ALL BAR */}
+            {sorted.length > 0 && (
+              <div onClick={selectAllVisible} style={{
+                display: "flex", alignItems: "center", gap: 8, cursor: "pointer",
+                padding: "8px 4px", marginBottom: 8, fontSize: 12, color: G.tm
+              }}>
+                <div style={{
+                  width: 20, height: 20, borderRadius: 6,
+                  border: `2px solid ${sorted.every(v => selected.has(v.id)) ? G.gold : G.br}`,
+                  background: sorted.every(v => selected.has(v.id)) ? G.gold : "transparent",
+                  display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: G.black
+                }}>{sorted.length > 0 && sorted.every(v => selected.has(v.id)) && "✓"}</div>
+                Tout sélectionner ({sorted.length} affiché{sorted.length>1?"s":""})
+              </div>
+            )}
 
             {loading ? (
               <p style={{ textAlign: "center", color: G.tm, padding: 40 }}>Chargement...</p>
             ) : (
-              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                {filtered.map(v => {
+              <div style={{ display: "flex", flexDirection: "column", gap: compact ? 6 : 10 }}>
+                {sorted.map(v => {
                   const isChecked = selected.has(v.id);
+                  if (compact) {
+                    return (
+                      <div key={v.id} onClick={() => toggleSelect(v.id)} style={{
+                        background: v.fraud ? "rgba(231,76,60,.06)" : G.s1,
+                        border: isChecked ? `2px solid ${G.gold}` : v.fraud ? `1px solid rgba(231,76,60,.35)` : `1px solid ${G.br}`,
+                        borderRadius: 10, padding: "9px 12px", cursor: "pointer",
+                        display: "flex", alignItems: "center", gap: 10
+                      }}>
+                        <div style={{
+                          width: 20, height: 20, borderRadius: 6, flexShrink: 0,
+                          border: `2px solid ${isChecked ? G.gold : G.br}`,
+                          background: isChecked ? G.gold : "transparent",
+                          display: "flex", alignItems: "center", justifyContent: "center",
+                          fontSize: 11, color: G.black
+                        }}>{isChecked && "✓"}</div>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 13.5, color: G.tx, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                            {v.prenom} {v.nom} {v.fraud && <span style={{ color: G.red }}>🚩</span>}
+                          </div>
+                          <div style={{ fontSize: 10.5, color: G.tm, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                            {v.niveau || "—"} · {v.dept || "—"} · ♚{nameOf(v.roi)} · ♛{nameOf(v.reine)}
+                          </div>
+                        </div>
+                        <button
+                          onClick={e => { e.stopPropagation(); deleteVote(v); }}
+                          style={{ flexShrink: 0, padding: "5px 9px", background: "rgba(231,76,60,.12)", border: "1px solid rgba(231,76,60,.4)", borderRadius: 7, color: G.red, fontSize: 10 }}
+                        >🗑️</button>
+                      </div>
+                    );
+                  }
                   return (
                     <div key={v.id} onClick={() => toggleSelect(v.id)} style={{
                       background: v.fraud ? "rgba(231,76,60,.06)" : G.s1,
@@ -280,7 +374,7 @@ export default function Admin() {
                     </div>
                   );
                 })}
-                {filtered.length === 0 && <p style={{ textAlign: "center", color: G.tm, padding: 30 }}>Aucun vote trouvé</p>}
+                {sorted.length === 0 && <p style={{ textAlign: "center", color: G.tm, padding: 30 }}>Aucun vote trouvé</p>}
               </div>
             )}
           </>
