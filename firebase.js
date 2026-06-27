@@ -1,17 +1,14 @@
-import { initializeApp } from "firebase/app";
-import { getFirestore } from "firebase/firestore";
-import { getAuth } from "firebase/auth";
+import React from 'react'
+import ReactDOM from 'react-dom/client'
+import App from './App.jsx'
+import Admin from './Admin.jsx'
 
-const firebaseConfig = {
-  apiKey: "AIzaSyAk6K2Tlw26w6u7c7BEHxGACFm-HrqcxwE",
-  authDomain: "nuit-des-eclats.firebaseapp.com",
-  projectId: "nuit-des-eclats",
-  storageBucket: "nuit-des-eclats.firebasestorage.app",
-  messagingSenderId: "860876094936",
-  appId: "1:860876094936:web:4d17306bafad5617e146ad",
-  measurementId: "G-0YD7XHK91D"
-};
+// Simple routing without extra dependencies:
+// visit yoursite.vercel.app/admin to access the dashboard
+const isAdmin = window.location.pathname.startsWith('/admin')
 
-const app = initializeApp(firebaseConfig);
-export const db = getFirestore(app);
-export const auth = getAuth(app);
+ReactDOM.createRoot(document.getElementById('root')).render(
+  <React.StrictMode>
+    {isAdmin ? <Admin /> : <App />}
+  </React.StrictMode>
+)
